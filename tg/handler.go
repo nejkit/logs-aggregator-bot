@@ -34,11 +34,13 @@ func (t *TgHandler) Start(ctx context.Context) {
 				go t.processCallback(update)
 				continue
 			}
-			if update.Message.IsCommand() {
-				go t.processCommand(update)
-				continue
+			if update.Message != nil {
+				if update.Message.IsCommand() {
+					go t.processCommand(update)
+					continue
+				}
+				go t.processMessage(update)
 			}
-			go t.processMessage(update)
 		}
 	}
 }
