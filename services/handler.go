@@ -62,6 +62,72 @@ func (a *ApiHandler) HandleStopWorkDayCommand() {
 	a.doneChan <- struct{}{}
 }
 
+func (a *ApiHandler) HandleDeleteLogsCommand() {
+	settings, err := a.provider.GetUserSettings()
+
+	if err != nil {
+		logrus.Errorf("Failed to get user settings: %v", err)
+		return
+	}
+
+	settings.CurrentState = constants.UserStateSelectLogsToDelete
+
+	dates, err := a.provider.GetDatesWithLogs()
+
+	if err != nil {
+		logrus.Errorf("Failed to get dates: %v", err)
+		return
+	}
+
+	if len(dates) == 0 {
+		err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+			ChatId: settings.UserId,
+			Body:   "Нет логов для удаления",
+		})
+
+		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
+		}
+
+		return
+	}
+
+	err = a.provider.SetUserSettings(settings)
+
+	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
+		return
+	}
+
+	var markup []models.MarkupData
+
+	for i, date := range dates {
+		if i == 5 {
+			break
+		}
+
+		markup = append(markup, models.MarkupData{
+			Key:   date,
+			Value: date,
+		})
+	}
+
+	markup = append(markup, models.MarkupData{
+		Key:   "Завершить",
+		Value: constants.CallbackStopDeleteLogs,
+	})
+
+	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+		ChatId: settings.UserId,
+		Body:   "Выберите елементы для их удаления",
+		Markup: markup,
+	})
+
+	if err != nil {
+		logrus.Errorf("Failed to send message: %v", err)
+	}
+}
+
 func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 	settings, err := a.provider.GetUserSettings()
 
@@ -136,6 +202,35 @@ func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 			return
 		}
 	}
+}
+
+func (a *ApiHandler) HandleDeleteCallbackParam(data string) bool {
+	if data == constants.CallbackStopDeleteLogs {
+		settings, err := a.provider.GetUserSettings()
+
+		if err != nil {
+			logrus.Errorf("Failed to get user settings: %v", err)
+			return false
+		}
+
+		settings.CurrentState = constants.UserStateNone
+		err = a.provider.SetUserSettings(settings)
+
+		if err != nil {
+			logrus.Errorf("Failed to set user settings: %v", err)
+			return false
+		}
+		return false
+	}
+
+	err := a.provider.DeleteLogsByDate(data)
+
+	if err != nil {
+		logrus.Errorf("failed delete logs: %v", err)
+		return false
+	}
+
+	return true
 }
 
 func (a *ApiHandler) HandleCallbackSelectOldLogDate(data string) {
@@ -358,25 +453,7 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 		return
 	}
 
-	firstLog := getFirstLog(logs)
-	lastLog := getLastLog(logs)
-
-	messageText := fmt.Sprintf("Отчет по времени за период: %s-%s:\n", utils.GetOnlyTime(firstLog.StartWorkTime), utils.GetOnlyTime(lastLog.EndWorkTime))
-
-	for _, v := range logs {
-		delta := v.EndWorkTime.Sub(v.StartWorkTime)
-		diffStr := ""
-
-		if int(delta.Hours()) > 0 {
-			diffStr += fmt.Sprintf("%dh", int(delta.Hours()))
-		}
-
-		if int(delta.Minutes()) > 0 {
-			diffStr += fmt.Sprintf(" %dm", int(delta.Minutes()))
-		}
-
-		messageText += fmt.Sprintf("Задача: %s, Начало работ: %s, Конец работ: %s, Затрачено времени: %s \n", v.Message, utils.GetOnlyTime(v.StartWorkTime), utils.GetOnlyTime(v.EndWorkTime), diffStr)
-	}
+	messageText := constructLogsTable(logs)
 
 	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
 		ChatId: settings.UserId,
@@ -386,6 +463,116 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 	if err != nil {
 		logrus.Errorf("Failed to send message: %v", err)
 		return
+	}
+}
+
+func (a *ApiHandler) HandleGetAllLogsCommand() {
+	settings, err := a.provider.GetUserSettings()
+
+	if err != nil {
+		logrus.Errorf("failed to get user settings: %v", err)
+		return
+	}
+
+	availableDates, err := a.provider.GetDatesWithLogs()
+
+	if err != nil {
+		logrus.Errorf("Failed to get dates: %v", err)
+		return
+	}
+
+	if len(availableDates) == 0 {
+		err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+			ChatId: settings.UserId,
+			Body:   "У вас нет логов за период использования приложения",
+		})
+
+		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
+		}
+		return
+	}
+
+	var markup []models.MarkupData
+	for _, date := range availableDates {
+		markup = append(markup, models.MarkupData{
+			Key:   date,
+			Value: date,
+		})
+	}
+
+	settings.CurrentState = constants.UserStateSelectLogDate
+
+	err = a.provider.SetUserSettings(settings)
+
+	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
+		return
+	}
+
+	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+		ChatId: settings.UserId,
+		Body:   "Выберите дату, за которую вы хотите получить логи",
+		Markup: markup,
+	})
+
+	if err != nil {
+		logrus.Errorf("Failed to send message: %v", err)
+	}
+}
+
+func (a *ApiHandler) HandleCallbackWithGetLog(data string) {
+	settings, err := a.provider.GetUserSettings()
+
+	if err != nil {
+		logrus.Errorf("failed to get user settings: %v", err)
+		return
+	}
+
+	settings.CurrentState = constants.UserStateNone
+
+	err = a.provider.SetUserSettings(settings)
+
+	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
+		return
+	}
+
+	parsedDate, err := time.Parse("2006-01-02", data)
+
+	if err != nil {
+		logrus.Errorf("Failed to parse date: %v", err)
+		return
+	}
+
+	logs, err := a.provider.GetLogRecords(parsedDate)
+
+	if err != nil {
+		logrus.Errorf("Failed to get logs: %v", err)
+		return
+	}
+
+	if len(logs) == 0 {
+		err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+			ChatId: settings.UserId,
+			Body:   "Логов за указанный период не найдено. Возможно файл с логами был очищен",
+		})
+
+		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
+		}
+		return
+	}
+
+	messageText := constructLogsTable(logs)
+
+	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
+		ChatId: settings.UserId,
+		Body:   messageText,
+	})
+
+	if err != nil {
+		logrus.Errorf("failed to sent message: %v", err)
 	}
 }
 
@@ -411,4 +598,28 @@ func getLastLog(logs []models.LogsInfoDto) models.LogsInfoDto {
 	}
 
 	return logs[lastLogIndex]
+}
+
+func constructLogsTable(logs []models.LogsInfoDto) string {
+	firstLog := getFirstLog(logs)
+	lastLog := getLastLog(logs)
+
+	messageText := fmt.Sprintf("Отчет по времени за период: %s-%s:\n", utils.GetOnlyTime(firstLog.StartWorkTime), utils.GetOnlyTime(lastLog.EndWorkTime))
+
+	for _, v := range logs {
+		delta := v.EndWorkTime.Sub(v.StartWorkTime)
+		diffStr := ""
+
+		if int(delta.Hours()) > 0 {
+			diffStr += fmt.Sprintf("%dh", int(delta.Hours()))
+		}
+
+		if int(delta.Minutes()) > 0 {
+			diffStr += fmt.Sprintf(" %dm", int(delta.Minutes()))
+		}
+
+		messageText += fmt.Sprintf("Задача: %s, Начало работ: %s, Конец работ: %s, Затрачено времени: %s \n", v.Message, utils.GetOnlyTime(v.StartWorkTime), utils.GetOnlyTime(v.EndWorkTime), diffStr)
+	}
+
+	return messageText
 }

@@ -189,6 +189,72 @@ func (j *JsonStorageProvider) GetLogRecords(date time.Time) ([]models.LogsInfoDt
 	return logData, nil
 }
 
+func (j *JsonStorageProvider) GetDatesWithLogs() ([]string, error) {
+	content, err := os.ReadFile(logFileNavigationFile)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var navigationDto models.LogsNavigationDto
+	err = json.Unmarshal(content, &navigationDto)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if navigationDto.Date == nil {
+		return []string{}, nil
+	}
+
+	dates := make([]string, 0)
+	for s, _ := range navigationDto.Date {
+		dates = append(dates, s)
+	}
+
+	return dates, nil
+}
+
+func (j *JsonStorageProvider) DeleteLogsByDate(date string) error {
+	content, err := os.ReadFile(logFileNavigationFile)
+
+	if err != nil {
+		return err
+	}
+
+	var navigationDto models.LogsNavigationDto
+	err = json.Unmarshal(content, &navigationDto)
+	if err != nil {
+		return err
+	}
+
+	if navigationDto.Date == nil {
+		return nil
+	}
+
+	fileName, exist := navigationDto.Date[date]
+
+	if !exist {
+		return nil
+	}
+
+	err = os.Remove(fileName)
+
+	if err != nil {
+		return err
+	}
+
+	delete(navigationDto.Date, date)
+
+	content, err = json.Marshal(navigationDto)
+
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(logFileNavigationFile, content, 0644)
+}
+
 func (j *JsonStorageProvider) getLogFileByDate(date time.Time) (string, error) {
 	content, err := os.ReadFile(logFileNavigationFile)
 

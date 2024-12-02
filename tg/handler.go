@@ -65,6 +65,28 @@ func (t *TgHandler) processCallback(update tgbotapi.Update) {
 		t.handler.HandleCallbackSelectNewLogDate(update.CallbackQuery.Data)
 	case constants.UserStateSelectOldLogDate:
 		t.handler.HandleCallbackSelectOldLogDate(update.CallbackQuery.Data)
+	case constants.UserStateSelectLogDate:
+		t.handler.HandleCallbackWithGetLog(update.CallbackQuery.Data)
+	case constants.UserStateSelectLogsToDelete:
+		isDeleted := t.handler.HandleDeleteCallbackParam(update.CallbackQuery.Data)
+
+		if isDeleted {
+			_, err = t.bot.AnswerCallbackQuery(tgbotapi.NewCallback(update.CallbackQuery.ID, "Успешное удаление"))
+
+			if err != nil {
+				logrus.Errorf("Failed to answer callback: %s", err.Error())
+			}
+
+			return
+		} else {
+			_, err = t.bot.AnswerCallbackQuery(tgbotapi.NewCallback(update.CallbackQuery.ID, "Вы отменили операцию удаления"))
+
+			if err != nil {
+				logrus.Errorf("Failed to answer callback: %s", err.Error())
+			}
+
+			return
+		}
 	default:
 		return
 	}
@@ -117,5 +139,13 @@ func (t *TgHandler) processCommand(update tgbotapi.Update) {
 
 	if update.Message.Command() == string(constants.GetLogsCommand) {
 		t.handler.HandleGetLogsCommand()
+	}
+
+	if update.Message.Command() == string(constants.GetAllLogsCommand) {
+		t.handler.HandleGetAllLogsCommand()
+	}
+
+	if update.Message.Command() == string(constants.DeleteLogsCommand) {
+		t.handler.HandleDeleteLogsCommand()
 	}
 }
