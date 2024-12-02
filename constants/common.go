@@ -14,3 +14,11 @@ const (
 	UserStateSelectNewLogDate
 	UserStateSelectNewLogMessage
 )
+
+type Commands string
+
+const (
+	StartWorkDayCommand Commands = "start_work_day"
+	EndWorkDayCommand   Commands = "end_work_day"
+	GetLogsCommand      Commands = "get_today_logs"
+)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
 )
 
 type ApiHandler struct {
@@ -26,23 +27,26 @@ func NewApiHandler(provider *provider.JsonStorageProvider, tgClient tgClient, sc
 }
 
 func (a *ApiHandler) HandleStartWorkDayCommand() {
-	fmt.Println("Handle start command")
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
-		fmt.Println(err.Error())
+		logrus.Errorf("Failed to get user settings: %v", err)
 		return
 	}
 
 	if settings.WorkStarted.Day() == time.Now().Day() {
 		fmt.Println("Today you used this")
-		_ = a.tgClient.SendMessage(&models.SendNotificationRequest{
+		err = a.tgClient.SendMessage(&models.SendNotificationRequest{
 			ChatId: settings.UserId,
 			Body:   "Вы уже начали свой рабочий день",
 		})
+
+		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
+		}
+
 		return
 	}
-	fmt.Println("Prepare scheduler")
 
 	if a.doneChan != nil {
 		close(a.doneChan)
@@ -62,34 +66,31 @@ func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("Failed to get user settings: %v", err)
 		return
 	}
 
-	if data == constants.CallbackParamContinueOldLog {
+	switch data {
+	case constants.CallbackParamContinueOldLog:
 		settings.CurrentState = constants.UserStateSelectOldLogDate
 
 		err = a.provider.SetUserSettings(settings)
 
 		if err != nil {
+			logrus.Errorf("Failed to set user settings: %v", err)
 			return
 		}
 
 		logs, err := a.provider.GetLogRecords(settings.WorkStarted)
 
 		if err != nil {
+			logrus.Errorf("Failed to get logs: %v", err)
 			return
 		}
 
-		oldLogIndex := 0
-
-		for i, v := range logs {
-			if v.EndWorkTime.Compare(logs[oldLogIndex].EndWorkTime) == 1 {
-				oldLogIndex = i
-			}
-		}
-
-		dateIntervals := utils.GetInterval(utils.RoundTimeToMinutes(logs[oldLogIndex].EndWorkTime), settings.NeedWorkLogTo.Add(time.Minute*14), time.Minute*10)
-		markup := []models.MarkupData{}
+		lastLog := getLastLog(logs)
+		dateIntervals := utils.GetInterval(utils.RoundTimeToMinutes(lastLog.EndWorkTime), settings.NeedWorkLogTo, time.Minute*10)
+		var markup []models.MarkupData
 
 		for _, v := range dateIntervals {
 			markup = append(markup, models.MarkupData{
@@ -105,11 +106,12 @@ func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 
 		err = a.tgClient.SendMessage(&models.SendNotificationRequest{
 			ChatId: settings.UserId,
-			Body:   fmt.Sprintf("Выберите время, по которую вы продолжали задачу %s", logs[oldLogIndex].Message),
+			Body:   fmt.Sprintf("Выберите время, по которую вы продолжали задачу %s", lastLog.Message),
 			Markup: markup,
 		})
 
 		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
 			return
 		}
 	}
@@ -120,6 +122,7 @@ func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 		err = a.provider.SetUserSettings(settings)
 
 		if err != nil {
+			logrus.Errorf("Failed to set user settings: %v", err)
 			return
 		}
 
@@ -129,6 +132,7 @@ func (a *ApiHandler) HandleCallbackSelectLogType(data string) {
 		})
 
 		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
 			return
 		}
 	}
@@ -138,33 +142,34 @@ func (a *ApiHandler) HandleCallbackSelectOldLogDate(data string) {
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("Failed to get user settings: %v", err)
 		return
 	}
 
 	logs, err := a.provider.GetLogRecords(settings.WorkStarted)
 
 	if err != nil {
+		logrus.Errorf("Failed to get logs: %v", err)
 		return
 	}
 
-	oldLogIndex := 0
-
-	for i, v := range logs {
-		if v.EndWorkTime.Compare(logs[oldLogIndex].EndWorkTime) == 1 {
-			oldLogIndex = i
-		}
-	}
+	oldLog := getLastLog(logs)
 	parsedLong, err := strconv.ParseInt(data, 10, 64)
 
 	if err != nil {
+		logrus.Errorf("Failed to parse date: %v", err)
 		return
 	}
 
 	parsedTime := time.UnixMilli(parsedLong)
 
-	log := logs[oldLogIndex]
-	log.EndWorkTime = parsedTime
-	a.provider.UpdateLogRecord(&log)
+	oldLog.EndWorkTime = parsedTime
+	err = a.provider.UpdateLogRecord(&oldLog)
+
+	if err != nil {
+		logrus.Errorf("Failed to update old log record: %v", err)
+		return
+	}
 
 	if settings.NeedWorkLogTo.Round(time.Second).Compare(parsedTime.Round(time.Second)) > 0 {
 		settings.CurrentState = constants.UserStateSelectNewLogMessage
@@ -172,6 +177,7 @@ func (a *ApiHandler) HandleCallbackSelectOldLogDate(data string) {
 		err = a.provider.SetUserSettings(settings)
 
 		if err != nil {
+			logrus.Errorf("Failed to set user settings: %v", err)
 			return
 		}
 
@@ -181,11 +187,16 @@ func (a *ApiHandler) HandleCallbackSelectOldLogDate(data string) {
 		})
 
 		if err != nil {
+			logrus.Errorf("Failed to send message: %v", err)
 			return
 		}
 	} else {
 		settings.CurrentState = constants.UserStateNone
 		err = a.provider.SetUserSettings(settings)
+
+		if err != nil {
+			logrus.Errorf("Failed to set user settings: %v", err)
+		}
 	}
 
 }
@@ -194,6 +205,7 @@ func (a *ApiHandler) HandleSelectNewLogMessage(message string) {
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("failed to get user settings: %v", err)
 		return
 	}
 
@@ -202,34 +214,29 @@ func (a *ApiHandler) HandleSelectNewLogMessage(message string) {
 	err = a.provider.SetUserSettings(settings)
 
 	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
 		return
 	}
 
 	logs, err := a.provider.GetLogRecords(settings.WorkStarted)
 
 	if err != nil {
+		logrus.Errorf("Failed to get logs: %v", err)
 		return
-	}
-
-	oldLogIndex := 0
-
-	for i, v := range logs {
-		if v.EndWorkTime.Compare(logs[oldLogIndex].EndWorkTime) == 1 {
-			oldLogIndex = i
-		}
 	}
 
 	a.cachedMessage = message
 
-	intervals := []time.Time{}
+	var intervals []time.Time
 
 	if len(logs) > 0 {
-		intervals = utils.GetInterval(logs[oldLogIndex].EndWorkTime, settings.NeedWorkLogTo, time.Minute*10)
+		lastLog := getLastLog(logs)
+		intervals = utils.GetInterval(lastLog.EndWorkTime, settings.NeedWorkLogTo, time.Minute*10)
 	} else {
 		intervals = utils.GetInterval(settings.WorkStarted, settings.NeedWorkLogTo, time.Minute*10)
 	}
 
-	markup := []models.MarkupData{}
+	var markup []models.MarkupData
 
 	for _, v := range intervals {
 		markup = append(markup, models.MarkupData{
@@ -250,6 +257,7 @@ func (a *ApiHandler) HandleSelectNewLogMessage(message string) {
 	})
 
 	if err != nil {
+		logrus.Errorf("Failed to send message: %v", err)
 		return
 	}
 }
@@ -258,21 +266,15 @@ func (a *ApiHandler) HandleCallbackSelectNewLogDate(data string) {
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("failed to get user settings: %v", err)
 		return
 	}
 
 	logs, err := a.provider.GetLogRecords(settings.WorkStarted)
 
 	if err != nil {
+		logrus.Errorf("Failed to get logs: %v", err)
 		return
-	}
-
-	oldLogIndex := 0
-
-	for i, v := range logs {
-		if v.EndWorkTime.Compare(logs[oldLogIndex].EndWorkTime) == 1 {
-			oldLogIndex = i
-		}
 	}
 
 	parsedLong, err := strconv.ParseInt(data, 10, 64)
@@ -286,7 +288,7 @@ func (a *ApiHandler) HandleCallbackSelectNewLogDate(data string) {
 	if len(logs) == 0 {
 		startTime = settings.WorkStarted
 	} else {
-		startTime = logs[oldLogIndex].EndWorkTime
+		startTime = getLastLog(logs).EndWorkTime
 	}
 
 	parsedTime := time.UnixMilli(parsedLong)
@@ -296,17 +298,31 @@ func (a *ApiHandler) HandleCallbackSelectNewLogDate(data string) {
 		EndWorkTime:   parsedTime,
 		Message:       a.cachedMessage,
 	}
-	_ = a.provider.InsertNewLogRecord(parsedTime, newLog)
+	err = a.provider.InsertNewLogRecord(parsedTime, newLog)
 	a.cachedMessage = ""
+
+	if err != nil {
+		logrus.Errorf("Failed to insert new log record: %v", err)
+	}
 
 	if settings.NeedWorkLogTo.Round(time.Second).Compare(parsedTime.Round(time.Second)) <= 0 {
 		settings.CurrentState = constants.UserStateNone
-		_ = a.provider.SetUserSettings(settings)
+		err = a.provider.SetUserSettings(settings)
+
+		if err != nil {
+			logrus.Errorf("Failed set user settings: %v", err)
+		}
+
 		return
 	}
 
 	settings.CurrentState = constants.UserStateSelectNewLogMessage
-	_ = a.provider.SetUserSettings(settings)
+	err = a.provider.SetUserSettings(settings)
+
+	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
+		return
+	}
 
 	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
 		ChatId: settings.UserId,
@@ -314,6 +330,7 @@ func (a *ApiHandler) HandleCallbackSelectNewLogDate(data string) {
 	})
 
 	if err != nil {
+		logrus.Errorf("Failed to send message: %v", err)
 		return
 	}
 }
@@ -322,12 +339,14 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 	settings, err := a.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("failed to get user settings: %v", err)
 		return
 	}
 
 	logs, err := a.provider.GetLogRecords(time.Now())
 
 	if err != nil {
+		logrus.Errorf("Failed to get logs: %v", err)
 		return
 	}
 
@@ -339,19 +358,10 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 		return
 	}
 
-	firstLog := 0
-	lastLog := 0
+	firstLog := getFirstLog(logs)
+	lastLog := getLastLog(logs)
 
-	for i, v := range logs {
-		if v.StartWorkTime.Compare(logs[firstLog].StartWorkTime) == -1 {
-			firstLog = i
-		}
-		if v.EndWorkTime.Compare(logs[lastLog].EndWorkTime) == 1 {
-			lastLog = i
-		}
-	}
-
-	messageText := fmt.Sprintf("Отчет по времени за период: %s-%s:\n", utils.GetOnlyTime(logs[firstLog].StartWorkTime), utils.GetOnlyTime(logs[lastLog].EndWorkTime))
+	messageText := fmt.Sprintf("Отчет по времени за период: %s-%s:\n", utils.GetOnlyTime(firstLog.StartWorkTime), utils.GetOnlyTime(lastLog.EndWorkTime))
 
 	for _, v := range logs {
 		delta := v.EndWorkTime.Sub(v.StartWorkTime)
@@ -365,7 +375,7 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 			diffStr += fmt.Sprintf(" %dm", int(delta.Minutes()))
 		}
 
-		messageText += fmt.Sprintf("Задача: %s, Начало работ: %s, Конец работ: %s, Затрачено времени: %s \n", v.Message, v.StartWorkTime, v.EndWorkTime, diffStr)
+		messageText += fmt.Sprintf("Задача: %s, Начало работ: %s, Конец работ: %s, Затрачено времени: %s \n", v.Message, utils.GetOnlyTime(v.StartWorkTime), utils.GetOnlyTime(v.EndWorkTime), diffStr)
 	}
 
 	err = a.tgClient.SendMessage(&models.SendNotificationRequest{
@@ -374,6 +384,31 @@ func (a *ApiHandler) HandleGetLogsCommand() {
 	})
 
 	if err != nil {
+		logrus.Errorf("Failed to send message: %v", err)
 		return
 	}
+}
+
+func getFirstLog(logs []models.LogsInfoDto) models.LogsInfoDto {
+	firstLogIndex := 0
+
+	for i, v := range logs {
+		if v.StartWorkTime.Compare(logs[firstLogIndex].StartWorkTime) == -1 {
+			firstLogIndex = i
+		}
+	}
+
+	return logs[firstLogIndex]
+}
+
+func getLastLog(logs []models.LogsInfoDto) models.LogsInfoDto {
+	lastLogIndex := 0
+
+	for i, v := range logs {
+		if v.EndWorkTime.Compare(logs[lastLogIndex].EndWorkTime) == 1 {
+			lastLogIndex = i
+		}
+	}
+
+	return logs[lastLogIndex]
 }

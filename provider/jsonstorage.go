@@ -19,19 +19,37 @@ const (
 type JsonStorageProvider struct {
 }
 
-func NewJsonStorageProvider() *JsonStorageProvider {
+func NewJsonStorageProvider() (*JsonStorageProvider, error) {
 	content := []byte("{}")
 	if _, err := os.Stat(userSettingsFile); errors.Is(err, os.ErrNotExist) {
-		os.Create(userSettingsFile)
-		os.WriteFile(userSettingsFile, content, 0644)
+		_, err = os.Create(userSettingsFile)
+
+		if err != nil {
+			return nil, err
+		}
+
+		err = os.WriteFile(userSettingsFile, content, 0644)
+
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if _, err := os.Stat(logFileNavigationFile); errors.Is(err, os.ErrNotExist) {
-		os.Create(logFileNavigationFile)
-		os.WriteFile(logFileNavigationFile, content, 0644)
+		_, err = os.Create(logFileNavigationFile)
+
+		if err != nil {
+			return nil, err
+		}
+
+		err = os.WriteFile(logFileNavigationFile, content, 0644)
+
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return &JsonStorageProvider{}
+	return &JsonStorageProvider{}, nil
 }
 
 func (j *JsonStorageProvider) GetUserSettings() (*models.UserSettingsDto, error) {
@@ -213,7 +231,11 @@ func (j *JsonStorageProvider) getLogFileByDate(date time.Time) (string, error) {
 			return fileName, nil
 		}
 		file, err := os.Create(fileName)
-		file.Close()
+		err = file.Close()
+
+		if err != nil {
+			return "", err
+		}
 
 		if err != nil {
 			return "", err

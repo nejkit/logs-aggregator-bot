@@ -14,24 +14,56 @@ import (
 )
 
 func main() {
-	provider := provider.NewJsonStorageProvider()
+	storageProvider := initStorage()
+	token := os.Getenv("API_TOKEN")
 
-	superUserCreds := os.Getenv("SUPER_USER_ID")
+	if token == "" {
+		panic("not passed API_TOKEN")
+	}
 
-	longSuperUser, err := strconv.ParseInt(superUserCreds, 10, 64)
+	tgBot, err := tgbotapi.NewBotAPI(token)
 
 	if err != nil {
 		panic(err)
 	}
 
-	currentSettings, err := provider.GetUserSettings()
+	tgClient := tg.NewTgClient(tgBot)
+
+	scheduler := services.NewSchedulerService(storageProvider, tgClient)
+	handler := services.NewApiHandler(storageProvider, tgClient, scheduler)
+
+	tgHandler := tg.NewTgHandler(tgBot, handler, storageProvider)
+
+	tgHandler.Start(context.TODO())
+}
+
+func initStorage() *provider.JsonStorageProvider {
+	storageProvider, err := provider.NewJsonStorageProvider()
+
+	if err != nil {
+		panic(err)
+	}
+
+	superUserId := os.Getenv("SUPER_USER_ID")
+
+	if superUserId == "" {
+		panic("not passed SUPER_USER_ID")
+	}
+
+	longSuperUser, err := strconv.ParseInt(superUserId, 10, 64)
+
+	if err != nil {
+		panic("SUPER_USER_ID is not a number")
+	}
+
+	currentSettings, err := storageProvider.GetUserSettings()
 
 	if err != nil {
 		panic(err)
 	}
 
 	if currentSettings.UserId != longSuperUser {
-		err = provider.SetUserSettings(&models.UserSettingsDto{
+		err = storageProvider.SetUserSettings(&models.UserSettingsDto{
 			UserId:       longSuperUser,
 			CurrentState: constants.UserStateNone,
 		})
@@ -41,20 +73,5 @@ func main() {
 		}
 	}
 
-	token := os.Getenv("API_TOKEN")
-
-	tgbot, err := tgbotapi.NewBotAPI(token)
-
-	if err != nil {
-		panic(err)
-	}
-
-	tgClient := tg.NewTgClient(tgbot)
-
-	scheduler := services.NewSchedulerService(provider, tgClient)
-	handler := services.NewApiHandler(provider, tgClient, scheduler)
-
-	tgHandler := tg.NewTgHandler(tgbot, handler, provider)
-
-	tgHandler.Start(context.TODO())
+	return storageProvider
 }

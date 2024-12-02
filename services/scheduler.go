@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"logs-aggregator-bot/constants"
 	"logs-aggregator-bot/models"
 	"logs-aggregator-bot/provider"
@@ -27,10 +28,12 @@ func (s *SchedulerService) Start(ctx context.Context, doneChan <-chan struct{}) 
 	settings, err := s.provider.GetUserSettings()
 
 	if err != nil {
+		logrus.Errorf("Failed to get user settings: %v", err)
 		return
 	}
 
 	if settings.WorkStarted.Day() == time.Now().Day() {
+		logrus.Warn("Scheduler is already running, skip request")
 		return
 	}
 
@@ -38,6 +41,7 @@ func (s *SchedulerService) Start(ctx context.Context, doneChan <-chan struct{}) 
 	err = s.provider.SetUserSettings(settings)
 
 	if err != nil {
+		logrus.Errorf("Failed to set user settings: %v", err)
 		return
 	}
 
@@ -54,6 +58,7 @@ func (s *SchedulerService) Start(ctx context.Context, doneChan <-chan struct{}) 
 			settings, err := s.provider.GetUserSettings()
 
 			if err != nil {
+				logrus.Errorf("Failed to get user settings: %v", err)
 				continue
 			}
 
@@ -63,43 +68,45 @@ func (s *SchedulerService) Start(ctx context.Context, doneChan <-chan struct{}) 
 			err = s.provider.SetUserSettings(settings)
 
 			if err != nil {
+				logrus.Errorf("Failed to set user settings: %v", err)
 				continue
 			}
 
 			logs, err := s.provider.GetLogRecords(settings.WorkStarted)
 
 			if err != nil {
-				fmt.Println(err.Error())
+				logrus.Errorf("Failed to get logs: %v", err)
 				continue
 			}
 
 			if len(logs) == 0 {
 				settings.CurrentState = constants.UserStateSelectNewLogMessage
 
-				_ = s.provider.SetUserSettings(settings)
+				err = s.provider.SetUserSettings(settings)
+
+				if err != nil {
+					logrus.Errorf("Failed to set user settings: %v", err)
+					continue
+				}
+
 				err = s.tgClient.SendMessage(&models.SendNotificationRequest{
 					ChatId: settings.UserId,
-					Body:   fmt.Sprintf("Залогайте вашу работу за период: %s-%s", utils.GetOnlyTime(utils.RoundTimeToMinutes(settings.WorkStarted)), utils.GetOnlyTime(utils.RoundTimeToMinutes(settings.NeedWorkLogTo))),
+					Body:   fmt.Sprintf("Залогайте вашу работу за период: %s-%s", utils.GetOnlyTime(settings.WorkStarted), utils.GetOnlyTime(settings.NeedWorkLogTo)),
 				})
 
 				if err != nil {
+					logrus.Errorf("Failed to send message to user: %v", err)
 					continue
 				}
 
 				continue
 			}
 
-			lastLog := 0
-
-			for i, v := range logs {
-				if v.EndWorkTime.Compare(logs[lastLog].EndWorkTime) == 1 {
-					lastLog = i
-				}
-			}
+			lastLog := getLastLog(logs)
 
 			err = s.tgClient.SendMessage(&models.SendNotificationRequest{
 				ChatId: settings.UserId,
-				Body:   fmt.Sprintf("Ваш последний ворк-лог по работе: %s, время начала: %s,  желаете ли вы продолжить его по времени?", logs[lastLog].Message, utils.RoundTimeToMinutes(logs[lastLog].StartWorkTime)),
+				Body:   fmt.Sprintf("Ваш последний ворк-лог по работе: %s, время начала: %s,  желаете ли вы продолжить его по времени?", lastLog.Message, utils.GetOnlyTime(lastLog.StartWorkTime)),
 				Markup: []models.MarkupData{
 					{
 						Key:   "Да",
@@ -113,6 +120,7 @@ func (s *SchedulerService) Start(ctx context.Context, doneChan <-chan struct{}) 
 			})
 
 			if err != nil {
+				logrus.Errorf("Failed to send message to user: %v", err)
 				continue
 			}
 
